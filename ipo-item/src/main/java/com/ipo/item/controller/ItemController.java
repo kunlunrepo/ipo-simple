@@ -9,10 +9,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.joda.time.format.DateTimeFormat;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * description : 测试接口
@@ -28,6 +32,9 @@ public class ItemController {
 
     @Autowired
     private ItemService itemService;
+
+    @Autowired
+    private RedisTemplate redisTemplate;
 
     @RequestMapping(value = "/create", method = {RequestMethod.POST})
     @ResponseBody
@@ -51,18 +58,54 @@ public class ItemController {
         return CommonReturnType.create(itemVO);
     }
 
+    // 创建线程池
+    ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
+
     @RequestMapping(value = "/update", method = {RequestMethod.POST})
     @ResponseBody
     public CommonReturnType updateItem(@RequestBody ItemModel itemModel)  throws BusinessException {
+
+        String key = "item_" + itemModel.getId(); // key
+        // 删除缓存
+        redisTemplate.delete(key);
+
+        // 更新数据库
         ItemModel itemModelForReturn = itemService.updateItem(itemModel);
         ItemVO itemVO = convertVOFromModel(itemModelForReturn);
+
+        // 延迟删除缓存
+//        delayDel(key);
+        executorService.schedule(() -> {
+            log.info("数据延迟删除");
+            redisTemplate.delete(key);
+        }, 5, TimeUnit.SECONDS); // 延时5秒执行
+
         return CommonReturnType.create(itemVO);
+    }
+
+    private void delayDel(String key) {
+        try {
+            Thread.sleep(1*1000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        redisTemplate.delete(key);
     }
 
     @RequestMapping(value="/get", method = {RequestMethod.GET})
     @ResponseBody
     public CommonReturnType getItem(@RequestParam(name="id") Integer id) {
-        ItemModel itemModel = itemService.getItemById(id);
+
+        // 首先从缓存中读取
+        ItemModel itemModel = (ItemModel) redisTemplate.opsForValue().get("item_" + id);
+        if (null == itemModel) {
+            // 缓存中没有则从数据库中查询
+            itemModel = itemService.getItemById(id);
+
+            // 插入缓存中，方便下次查询
+            redisTemplate.opsForValue().set("item_" + id, itemModel);
+        }
+
         ItemVO itemVO = convertVOFromModel(itemModel);
         return CommonReturnType.create(itemVO);
     }
